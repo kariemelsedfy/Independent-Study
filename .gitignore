@@ -1,0 +1,95 @@
+# -------------------------------
+# Python & Environment
+# -------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environment
+venv/
+.env/
+.venv/
+env/
+ENV/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# -------------------------------
+# OS / IDE files
+# -------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# -------------------------------
+# Logs & Outputs
+# -------------------------------
+*.log
+logs/
+output/
+runs/
+wandb/
+lightning_logs/
+
+# -------------------------------
+# PyTorch Checkpoints
+# -------------------------------
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+checkpoints/
+models/
+saved_models/
+
+# -------------------------------
+# Data
+# -------------------------------
+bus_dataset/
+splits/
+*.csv
+*.tar
+*.zip
+*.gz
+*.npz
+
+# -------------------------------
+# Temporary / Generated Files
+# -------------------------------
+*.tmp
+*.bak
+*.old
+*.npy
+*.pkl
+
+# -------------------------------
+# Cloud Sync Artifacts
+# -------------------------------
+~$*
+*.icloud
+*.sync
+*.onedrive*
+*.dropbox*
+
+# -------------------------------
+# Local configs or credentials
+# -------------------------------
+*.cfg
+*.ini
+*.json
+*.yaml
+*.yml
+secrets.txt
+config.json
+
+# -------------------------------
+# Misc
+# -------------------------------
+test_results/
+debug/
+__results__/
