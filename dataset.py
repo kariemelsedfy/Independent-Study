@@ -7,10 +7,10 @@ import os
 import pandas as pd
 from PIL import Image
 
-from PIL import Image, ImageOps
-
 class busDataset(torch.utils.data.Dataset):
-    def __init__(self, csv_file, img_dir, label_dir, S=7, B=2, C=1, transform=None):
+    def __init__(
+        self, csv_file, img_dir, label_dir, S=7, B=2, C=1, transform=None,
+    ):
         self.annotations = pd.read_csv(csv_file)
         self.img_dir = img_dir
         self.label_dir = label_dir
@@ -23,46 +23,47 @@ class busDataset(torch.utils.data.Dataset):
         return len(self.annotations)
 
     def __getitem__(self, index):
-        # ---- read labels ----
-        label_path = os.path.join(self.label_dir, self.annotations.iloc[index, 1])
-        boxes = []
-        with open(label_path) as f:
-            for label in f.readlines():
-                class_label, x, y, width, height = [
-                    float(x) if float(x) != int(float(x)) else int(x)
-                    for x in label.replace("\n", "").split()
-                ]
-                boxes.append([class_label, x, y, width, height])
-        boxes = torch.tensor(boxes)
+        # Try repeatedly until we find a valid RGB image
+        while True:
+            label_path = os.path.join(self.label_dir, self.annotations.iloc[index, 1])
+            boxes = []
+            with open(label_path) as f:
+                for label in f.readlines():
+                    class_label, x, y, width, height = [
+                        float(x) if float(x) != int(float(x)) else int(x)
+                        for x in label.replace("\n", "").split()
+                    ]
+                    boxes.append([class_label, x, y, width, height])
 
-        # ---- read image & force RGB ----
-        img_path = os.path.join(self.img_dir, self.annotations.iloc[index, 0])
-        img = Image.open(img_path)
-        img = ImageOps.exif_transpose(img)         # fix orientation from EXIF
-        img = img.convert("RGB")                   # <<< guarantees 3 channels
+            img_path = os.path.join(self.img_dir, self.annotations.iloc[index, 0])
+            try:
+                image = Image.open(img_path)
+            except Exception as e:
+                index = (index + 1) % len(self.annotations)
+                continue  # skip and move to next image
 
-        # ---- transforms ----
-        if self.transform:
-            img, boxes = self.transform(img, boxes)
-
-        # ---- grid encoding ----
-        # Remove the 7x7 label matrix construction block entirely and replace with:
-        H = W = 448
-        target = torch.zeros(5, H, W)  # [mask, x1, y1, x2, y2]
-
-        # boxes is Nx5 with columns: class, cx, cy, w, h (normalized 0..1)
-        for box in boxes:
-            class_label, cx, cy, w, h = box.tolist()
-            x1 = int((cx - w/2) * W); y1 = int((cy - h/2) * H)
-            x2 = int((cx + w/2) * W); y2 = int((cy + h/2) * H)
-            x1 = max(0, x1); y1 = max(0, y1); x2 = min(W-1, x2); y2 = min(H-1, y2)
-            if x2 <= x1 or y2 <= y1:
+            # Skip non-RGB images
+            if image.mode != "RGB":
+                index = (index + 1) % len(self.annotations)
                 continue
-            target[0, y1:y2, x1:x2] = 1.0
-            target[1, y1:y2, x1:x2] = x1 / W
-            target[2, y1:y2, x1:x2] = y1 / H
-            target[3, y1:y2, x1:x2] = x2 / W
-            target[4, y1:y2, x1:x2] = y2 / H
 
-        return img, target
+            boxes = torch.tensor(boxes)
+            if self.transform:
+                image, boxes = self.transform(image, boxes)
 
+            # Convert To Cells
+            label_matrix = torch.zeros((self.S, self.S, self.C + 5 * self.B))
+            for box in boxes:
+                class_label, x, y, width, height = box.tolist()
+                class_label = int(class_label)
+                i, j = int(self.S * y), int(self.S * x)
+                x_cell, y_cell = self.S * x - j, self.S * y - i
+                width_cell, height_cell = width * self.S, height * self.S
+
+                if label_matrix[i, j, self.C] == 0:
+                    label_matrix[i, j, self.C] = 1
+                    box_coordinates = torch.tensor([x_cell, y_cell, width_cell, height_cell])
+                    label_matrix[i, j, self.C+1:self.C+5] = box_coordinates
+                    label_matrix[i, j, class_label] = 1
+
+            return image, label_matrix

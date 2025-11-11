@@ -22,7 +22,7 @@ from utils import (
     save_checkpoint,
     load_checkpoint,
 )
-from loss import YoloLoss, PixelLoss
+from loss import YoloLoss
 
 seed = 123
 torch.manual_seed(seed)
@@ -35,13 +35,13 @@ if torch.cuda.is_available():
     DEVICE = "cuda"
 else:
     DEVICE = "cpu"
-BATCH_SIZE = 1 # 64 in original paper but I don't have that much vram, grad accum?
+BATCH_SIZE = 16 # 64 in original paper but I don't have that much vram, grad accum?
 WEIGHT_DECAY = 0
 EPOCHS = 20
 NUM_WORKERS = 0
 PIN_MEMORY = False
-LOAD_MODEL = True
-LOAD_MODEL_FILE = "checkpoint50.pth.tar"
+LOAD_MODEL = False
+LOAD_MODEL_FILE = "checkpoint.pth.tar"
 IMG_DIR = "bus_dataset/images"
 LABEL_DIR = "bus_dataset/labels"
 
@@ -103,7 +103,7 @@ def main():
     optimizer = optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
-    loss_fn = PixelLoss(lambda_box=0.5)
+    loss_fn = YoloLoss()
 
     if LOAD_MODEL:
         load_checkpoint(torch.load(LOAD_MODEL_FILE, map_location='cpu'), model, optimizer)
@@ -138,37 +138,36 @@ def main():
         drop_last=True,
     )
 
-    if LOAD_MODEL:
-        model.eval()
-        with torch.no_grad():
-            for imgs, _ in test_loader:
-                imgs = imgs.to(DEVICE)
-                preds = model(imgs)
-                probs = preds[:,0].sigmoid().cpu()   # (B,448,448)
+        # model.eval()
+        # with torch.no_grad():
+        #     for imgs, _ in test_loader:
+        #         imgs = imgs.to(DEVICE)
+        #         preds = model(imgs)
+        #         probs = preds[:,0].sigmoid().cpu()   # (B,448,448)
 
-                img0 = FT.to_pil_image(imgs[0].cpu())
-                m0   = probs[0].numpy()
+        #         img0 = FT.to_pil_image(imgs[0].cpu())
+        #         m0   = probs[0].numpy()
 
-                plt.figure(figsize=(6,6))
-                plt.imshow(img0)
-                plt.imshow(m0, alpha=0.5, cmap="inferno")  # heatmap overlay
+        #         plt.figure(figsize=(6,6))
+        #         plt.imshow(img0)
+        #         plt.imshow(m0, alpha=0.5, cmap="inferno")  # heatmap overlay
 
-                # plt.gca().add_patch(plt.Rectangle((x1,y1), x2-x1, y2-y1,
-                #                                 fill=False, edgecolor="lime", linewidth=2))
-                plt.axis("off")
-                plt.show()
-        return
+        #         # plt.gca().add_patch(plt.Rectangle((x1,y1), x2-x1, y2-y1,
+        #         #                                 fill=False, edgecolor="lime", linewidth=2))
+        #         plt.axis("off")
+        #         plt.show()
+        # return
 
     for epoch in range(EPOCHS):
-        for x, y in train_loader:
-            x = x.to(DEVICE)
-            for idx in range(8):
-                bboxes = cellboxes_to_boxes(model(x))
-                bboxes = non_max_suppression(bboxes[idx], iou_threshold=0.5, threshold=0.4, box_format="midpoint")
-                plot_image(x[idx].permute(1,2,0).to("cpu"), bboxes)
+        # for x, y in train_loader:
+        #     x = x.to(DEVICE)
+        #     for idx in range(8):
+        #         bboxes = cellboxes_to_boxes(model(x))
+        #         bboxes = non_max_suppression(bboxes[idx], iou_threshold=0.5, threshold=0.4, box_format="midpoint")
+        #         plot_image(x[idx].permute(1,2,0).to("cpu"), bboxes)
 
-            import sys
-            sys.exit()
+        #     import sys
+        #     sys.exit()
 
         model.train()
         loop = tqdm(train_loader, leave=True)
