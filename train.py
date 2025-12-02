@@ -11,7 +11,7 @@ import torchvision.transforms.functional as FT
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from model import Yolov1
-from dataset import busDataset
+from dataset import CubYoloDataset
 from utils import (
     non_max_suppression,
     mean_average_precision,
@@ -37,13 +37,12 @@ else:
     DEVICE = "cpu"
 BATCH_SIZE = 16 # 64 in original paper but I don't have that much vram, grad accum?
 WEIGHT_DECAY = 0
-EPOCHS = 20
+EPOCHS = 30
 NUM_WORKERS = 0
 PIN_MEMORY = False
 LOAD_MODEL = False
-LOAD_MODEL_FILE = "checkpoint.pth.tar"
-IMG_DIR = "bus_dataset/images"
-LABEL_DIR = "bus_dataset/labels"
+LOAD_MODEL_FILE = "CUB.pth.tar"
+CUB_ROOT = "CUB_200_2011/CUB_200_2011"
 
 
 from torchvision import transforms as T
@@ -99,25 +98,32 @@ def train_fn(train_loader, model, optimizer, loss_fn):
 
 
 def main():
-    model = Yolov1(split_size=7, num_boxes=2, num_classes=1).to(DEVICE)
+    model = Yolov1(split_size=7, num_boxes=2, num_classes=200).to(DEVICE)
     optimizer = optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
-    loss_fn = YoloLoss()
+    loss_fn = YoloLoss(S=7, B=2, C=200)
 
     if LOAD_MODEL:
         load_checkpoint(torch.load(LOAD_MODEL_FILE, map_location='cpu'), model, optimizer)
     
 
-    train_dataset = busDataset(
-        "splits/train.csv",
+    train_dataset = CubYoloDataset(
+        cub_root=CUB_ROOT,
+        split="train",
+        S=7,
+        B=2,
+        C=200,
         transform=transform,
-        img_dir=IMG_DIR,
-        label_dir=LABEL_DIR,
     )
 
-    test_dataset = busDataset(
-        "splits/test.csv", transform=transform, img_dir=IMG_DIR, label_dir=LABEL_DIR,
+    test_dataset = CubYoloDataset(
+        cub_root=CUB_ROOT,
+        split="test",
+        S=7,
+        B=2,
+        C=200,
+        transform=transform,
     )
 
     train_loader = DataLoader(
@@ -138,37 +144,8 @@ def main():
         drop_last=True,
     )
 
-        # model.eval()
-        # with torch.no_grad():
-        #     for imgs, _ in test_loader:
-        #         imgs = imgs.to(DEVICE)
-        #         preds = model(imgs)
-        #         probs = preds[:,0].sigmoid().cpu()   # (B,448,448)
-
-        #         img0 = FT.to_pil_image(imgs[0].cpu())
-        #         m0   = probs[0].numpy()
-
-        #         plt.figure(figsize=(6,6))
-        #         plt.imshow(img0)
-        #         plt.imshow(m0, alpha=0.5, cmap="inferno")  # heatmap overlay
-
-        #         # plt.gca().add_patch(plt.Rectangle((x1,y1), x2-x1, y2-y1,
-        #         #                                 fill=False, edgecolor="lime", linewidth=2))
-        #         plt.axis("off")
-        #         plt.show()
-        # return
-
+        
     for epoch in range(EPOCHS):
-        # for x, y in train_loader:
-        #     x = x.to(DEVICE)
-        #     for idx in range(8):
-        #         bboxes = cellboxes_to_boxes(model(x))
-        #         bboxes = non_max_suppression(bboxes[idx], iou_threshold=0.5, threshold=0.4, box_format="midpoint")
-        #         plot_image(x[idx].permute(1,2,0).to("cpu"), bboxes)
-
-        #     import sys
-        #     sys.exit()
-
         model.train()
         loop = tqdm(train_loader, leave=True)
         running = 0.0
@@ -187,8 +164,12 @@ def main():
 
         print(f"Epoch {epoch+1}: loss={running/len(loop):.4f}")
 
-        if epoch == 49:
-            save_checkpoint()
+        if epoch == 29:
+            checkpoint = {
+                "state_dict": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+            }
+            save_checkpoint(checkpoint, filename=LOAD_MODEL_FILE)
 
 if __name__ == "__main__":
     main()

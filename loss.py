@@ -12,7 +12,7 @@ class YoloLoss(nn.Module):
     Calculate the loss for yolo (v1) model
     """
 
-    def __init__(self, S=7, B=2, C=1):
+    def __init__(self, S=7, B=2, C=200):
         super(YoloLoss, self).__init__()
         self.mse = nn.MSELoss(reduction="sum")
 
