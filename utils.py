@@ -200,6 +200,19 @@ def mean_average_precision(
 
     return sum(average_precisions) / len(average_precisions)
 
+def cellboxes_to_boxes(out, S=7, B=2, C=200):
+    converted_pred = convert_cellboxes(out, S=S, B=B, C=C).reshape(out.shape[0], S * S, -1)
+    converted_pred[..., 0] = converted_pred[..., 0].long()
+    all_bboxes = []
+
+    for ex_idx in range(out.shape[0]):
+        bboxes = []
+        for bbox_idx in range(S * S):
+            bboxes.append([x.item() for x in converted_pred[ex_idx, bbox_idx, :]])
+        all_bboxes.append(bboxes)
+
+    return all_bboxes
+
 
 def plot_image(image, boxes):
     """Plots predicted bounding boxes on the image"""
@@ -288,56 +301,59 @@ def get_bboxes(
 
 
 
-def convert_cellboxes(predictions, S=7):
+def convert_cellboxes(predictions, S=7, B=2, C=200):
     """
-    Converts bounding boxes output from Yolo with
-    an image split size of S into entire image ratios
-    rather than relative to cell ratios. Tried to do this
-    vectorized, but this resulted in quite difficult to read
-    code... Use as a black box? Or implement a more intuitive,
-    using 2 for loops iterating range(S) and convert them one
-    by one, resulting in a slower but more readable implementation.
+    predictions: (N, S*S*(C + 5B)) from the model
+    returns: (N, S, S, 6) with per-cell [class, conf, x, y, w, h]
+    where x,y,w,h are normalized to [0,1] in image coordinates.
     """
 
     predictions = predictions.to("cpu")
     batch_size = predictions.shape[0]
-    predictions = predictions.reshape(batch_size, 7, 7, 11)
-    bboxes1 = predictions[..., 2:6]
-    bboxes2 = predictions[..., 7:11]
-    scores = torch.cat(
-        (predictions[..., 1].unsqueeze(0), predictions[..., 6].unsqueeze(0)), dim=0
+
+    # reshape according to C and B instead of hard-coded 11
+    predictions = predictions.reshape(batch_size, S, S, C + 5 * B)
+
+    # box1 and box2: [x, y, w, h] for each
+    # layout per cell: [C class logits] [conf1] [x1,y1,w1,h1] [conf2] [x2,y2,w2,h2]
+    bboxes1 = predictions[..., C + 1 : C + 5]    # (N,S,S,4)
+    bboxes2 = predictions[..., C + 6 : C + 10]   # (N,S,S,4)
+
+    # confidence scores for both boxes
+    scores = torch.stack(
+        [
+            predictions[..., C],       # conf1
+            predictions[..., C + 5],   # conf2
+        ],
+        dim=0,                         # (2,N,S,S)
     )
-    best_box = scores.argmax(0).unsqueeze(-1)
-    best_boxes = bboxes1 * (1 - best_box) + best_box * bboxes2
-    cell_indices = torch.arange(7).repeat(batch_size, 7, 1).unsqueeze(-1)
-    x = 1 / S * (best_boxes[..., :1] + cell_indices)
+
+    # choose best box per cell
+    best_box = scores.argmax(0).unsqueeze(-1)    # (N,S,S,1) in {0,1}
+    best_boxes = bboxes1 * (1 - best_box) + bboxes2 * best_box
+
+    # convert from cell-relative coords to image-relative [0,1]
+    cell_indices = torch.arange(S).repeat(batch_size, S, 1).unsqueeze(-1)  # (N,S,S,1)
+
+    # x: (x_cell + j)/S, y: (y_cell + i)/S
+    x = 1 / S * (best_boxes[..., 0:1] + cell_indices)
     y = 1 / S * (best_boxes[..., 1:2] + cell_indices.permute(0, 2, 1, 3))
-    w_y = 1 / S * best_boxes[..., 2:4]
-    converted_bboxes = torch.cat((x, y, w_y), dim=-1)
-    predicted_class = predictions[..., :1].argmax(-1).unsqueeze(-1)
-    best_confidence = torch.max(predictions[..., 1], predictions[..., 6]).unsqueeze(
-        -1
-    )
+    w_h = 1 / S * best_boxes[..., 2:4]
+    converted_bboxes = torch.cat((x, y, w_h), dim=-1)  # (N,S,S,4)
+
+    # predicted class per cell
+    predicted_class = predictions[..., :C].argmax(-1).unsqueeze(-1)  # (N,S,S,1)
+
+    # best confidence out of the two boxes
+    best_confidence = scores.max(0)[0].unsqueeze(-1)  # (N,S,S,1)
+
+    # final layout: [class, conf, x, y, w, h]
     converted_preds = torch.cat(
         (predicted_class, best_confidence, converted_bboxes), dim=-1
     )
 
     return converted_preds
 
-
-def cellboxes_to_boxes(out, S=7):
-    converted_pred = convert_cellboxes(out).reshape(out.shape[0], S * S, -1)
-    converted_pred[..., 0] = converted_pred[..., 0].long()
-    all_bboxes = []
-
-    for ex_idx in range(out.shape[0]):
-        bboxes = []
-
-        for bbox_idx in range(S * S):
-            bboxes.append([x.item() for x in converted_pred[ex_idx, bbox_idx, :]])
-        all_bboxes.append(bboxes)
-
-    return all_bboxes
 
 def save_checkpoint(state, filename="my_checkpoint.pth.tar"):
     torch.save(state, filename)
@@ -348,4 +364,5 @@ def save_checkpoint(state, filename="my_checkpoint.pth.tar"):
 def load_checkpoint(checkpoint, model, optimizer):
     print("=> Loading checkpoint")
     model.load_state_dict(checkpoint["state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
+    if optimizer is not None and "optimizer" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer"])

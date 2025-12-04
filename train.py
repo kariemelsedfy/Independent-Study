@@ -40,8 +40,8 @@ WEIGHT_DECAY = 0
 EPOCHS = 30
 NUM_WORKERS = 0
 PIN_MEMORY = False
-LOAD_MODEL = False
-LOAD_MODEL_FILE = "CUB.pth.tar"
+LOAD_MODEL = True
+LOAD_MODEL_FILE = "CUB2.pth.tar"
 CUB_ROOT = "CUB_200_2011/CUB_200_2011"
 
 
@@ -98,31 +98,32 @@ def train_fn(train_loader, model, optimizer, loss_fn):
 
 
 def main():
-    model = Yolov1(split_size=7, num_boxes=2, num_classes=200).to(DEVICE)
+    S = 7
+    B = 2
+    C = 200
+
+    model = Yolov1(split_size=S, num_boxes=B, num_classes=C).to(DEVICE)
     optimizer = optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
-    loss_fn = YoloLoss(S=7, B=2, C=200)
+    loss_fn = YoloLoss()
 
-    if LOAD_MODEL:
-        load_checkpoint(torch.load(LOAD_MODEL_FILE, map_location='cpu'), model, optimizer)
-    
-
+    # --- DATASETS & LOADERS (same as during training) ---
     train_dataset = CubYoloDataset(
         cub_root=CUB_ROOT,
         split="train",
-        S=7,
-        B=2,
-        C=200,
+        S=S,
+        B=B,
+        C=C,
         transform=transform,
     )
 
     test_dataset = CubYoloDataset(
         cub_root=CUB_ROOT,
         split="test",
-        S=7,
-        B=2,
-        C=200,
+        S=S,
+        B=B,
+        C=C,
         transform=transform,
     )
 
@@ -144,32 +145,49 @@ def main():
         drop_last=True,
     )
 
-        
-    for epoch in range(EPOCHS):
-        model.train()
-        loop = tqdm(train_loader, leave=True)
-        running = 0.0
+    TEST_ONLY = True
 
-        for x, y in loop:
-            x, y = x.to(DEVICE), y.to(DEVICE)   # y is (B,5,H,W)
-            out = model(x)                      # (B,5,H,W)
-            loss = loss_fn(out, y)
+    if TEST_ONLY:
+        # 1) Load your trained weights
+        checkpoint = torch.load(LOAD_MODEL_FILE, map_location=DEVICE)
+        load_checkpoint(checkpoint, model, optimizer=None)  # ignore optimizer
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        model.eval()
+        with torch.no_grad():
+            for batch_idx, (x, labels) in enumerate(test_loader):
+                x = x.to(DEVICE)
+                labels = labels.to(DEVICE)
 
-            running += loss.item()
-            loop.set_postfix(loss=loss.item())
+                # 2) Forward pass
+                predictions = model(x)  # shape: (B, S*S*(C+5B))
 
-        print(f"Epoch {epoch+1}: loss={running/len(loop):.4f}")
+                # 3) Convert to bounding boxes per image
+                #    each element in bboxes[idx] is [class, conf, x, y, w, h]
+                bboxes = cellboxes_to_boxes(predictions)
 
-        if epoch == 29:
-            checkpoint = {
-                "state_dict": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-            save_checkpoint(checkpoint, filename=LOAD_MODEL_FILE)
+                # (optional) also decode ground-truth boxes if you want to see them
+                # true_bboxes = cellboxes_to_boxes(labels)
 
+                # 4) For a few images in the batch, apply NMS and plot
+                batch_size = x.shape[0]
+                for idx in range(min(batch_size, 10)):   # show up to 4 images
+                    nms_boxes = non_max_suppression(
+                        bboxes[idx],
+                        iou_threshold=0.5,
+                        threshold=0.4,
+                        box_format="midpoint",  # because boxes are [x, y, w, h]
+                    )
+
+                    # x[idx] is (3,H,W) → convert to (H,W,3) and move to CPU
+                    img = x[idx].permute(1, 2, 0).to("cpu")
+
+                    # 5) Draw predicted boxes on the image
+                    plot_image(img, nms_boxes)
+                    # if you also want GT, you could call plot_image twice or modify it
+
+                # only first batch
+                break
+
+        return
 if __name__ == "__main__":
     main()
