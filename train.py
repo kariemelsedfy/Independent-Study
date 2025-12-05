@@ -1,5 +1,5 @@
 """
-Main file for training Yolo model on bus dataset
+Main file for training Yolo model on CUB dataset
 
 """
 import matplotlib.pyplot as plt
@@ -9,9 +9,10 @@ import torchvision.transforms as transforms
 import torch.optim as optim
 import torchvision.transforms.functional as FT
 from tqdm import tqdm
+import torch.nn as nn
 from torch.utils.data import DataLoader
-from model import Yolov1
-from dataset import CubYoloDataset
+from model import Yolov1, YoloSegNet
+from dataset import CubYoloDataset, CubSegDataset
 from utils import (
     non_max_suppression,
     mean_average_precision,
@@ -38,11 +39,12 @@ else:
 BATCH_SIZE = 16 # 64 in original paper but I don't have that much vram, grad accum?
 WEIGHT_DECAY = 0
 EPOCHS = 30
-NUM_WORKERS = 0
+NUM_WORKERS = 4
 PIN_MEMORY = False
 LOAD_MODEL = True
 LOAD_MODEL_FILE = "CUB2.pth.tar"
 CUB_ROOT = "CUB_200_2011/CUB_200_2011"
+SEG_ROOT = "CUB_200_2011/segmentations"  # change if path is different
 
 
 from torchvision import transforms as T
@@ -98,96 +100,84 @@ def train_fn(train_loader, model, optimizer, loss_fn):
 
 
 def main():
-    S = 7
-    B = 2
-    C = 200
+    SEG_CHECKPOINT = "segnet_epoch200.pth.tar"  # whatever you saved
 
-    model = Yolov1(split_size=S, num_boxes=B, num_classes=C).to(DEVICE)
-    optimizer = optim.Adam(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
-    )
-    loss_fn = YoloLoss()
+    # Recreate the model with same architecture
+    CUB_CLASSES = 200
+    NUM_SEG_CLASSES = 2
 
-    # --- DATASETS & LOADERS (same as during training) ---
-    train_dataset = CubYoloDataset(
+
+    test_dataset = CubSegDataset(
         cub_root=CUB_ROOT,
-        split="train",
-        S=S,
-        B=B,
-        C=C,
-        transform=transform,
-    )
-
-    test_dataset = CubYoloDataset(
-        cub_root=CUB_ROOT,
+        seg_root=SEG_ROOT,
         split="test",
-        S=S,
-        B=B,
-        C=C,
-        transform=transform,
     )
-
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_size=BATCH_SIZE,
-        num_workers=NUM_WORKERS,
-        pin_memory=PIN_MEMORY,
-        shuffle=True,
-        drop_last=True,
-    )
-
     test_loader = DataLoader(
-        dataset=test_dataset,
+        test_dataset,
         batch_size=BATCH_SIZE,
+        shuffle=False,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
-        shuffle=True,
-        drop_last=True,
     )
+
+
+    yolo = Yolov1(
+        in_channels=3,
+        split_size=7,
+        num_boxes=2,
+        num_classes=CUB_CLASSES,
+    ).to(DEVICE)
+
+    seg_model = YoloSegNet(yolo, num_seg_classes=NUM_SEG_CLASSES).to(DEVICE)
+
+    # Load seg weights (no need for optimizer during testing)
+    checkpoint = torch.load(SEG_CHECKPOINT, map_location=DEVICE)
+    load_checkpoint(checkpoint, seg_model, optimizer=None)
+    
 
     TEST_ONLY = True
 
     if TEST_ONLY:
-        # 1) Load your trained weights
-        checkpoint = torch.load(LOAD_MODEL_FILE, map_location=DEVICE)
-        load_checkpoint(checkpoint, model, optimizer=None)  # ignore optimizer
+        seg_model.eval()
 
-        model.eval()
+        # get 1 batch from test loader
+        images, masks = next(iter(test_loader))
+        images = images.to(DEVICE)
+
         with torch.no_grad():
-            for batch_idx, (x, labels) in enumerate(test_loader):
-                x = x.to(DEVICE)
-                labels = labels.to(DEVICE)
+            logits = seg_model(images)
+            preds = torch.argmax(logits, dim=1)
 
-                # 2) Forward pass
-                predictions = model(x)  # shape: (B, S*S*(C+5B))
+        import matplotlib.pyplot as plt
 
-                # 3) Convert to bounding boxes per image
-                #    each element in bboxes[idx] is [class, conf, x, y, w, h]
-                bboxes = cellboxes_to_boxes(predictions)
+        # plot up to 4 images
+        for i in range(min(10, images.size(0))):
+            img   = images[i].permute(1, 2, 0).cpu().numpy()
+            mask_gt   = masks[i].cpu().numpy()
+            mask_pred = preds[i].cpu().numpy()
 
-                # (optional) also decode ground-truth boxes if you want to see them
-                # true_bboxes = cellboxes_to_boxes(labels)
+            plt.figure(figsize=(12,4))
 
-                # 4) For a few images in the batch, apply NMS and plot
-                batch_size = x.shape[0]
-                for idx in range(min(batch_size, 10)):   # show up to 4 images
-                    nms_boxes = non_max_suppression(
-                        bboxes[idx],
-                        iou_threshold=0.5,
-                        threshold=0.4,
-                        box_format="midpoint",  # because boxes are [x, y, w, h]
-                    )
+            plt.subplot(1,3,1)
+            plt.title("Image")
+            plt.imshow(img)
+            plt.axis("off")
 
-                    # x[idx] is (3,H,W) → convert to (H,W,3) and move to CPU
-                    img = x[idx].permute(1, 2, 0).to("cpu")
+            plt.subplot(1,3,2)
+            plt.title("GT mask")
+            plt.imshow(mask_gt, cmap="gray")
+            plt.axis("off")
 
-                    # 5) Draw predicted boxes on the image
-                    plot_image(img, nms_boxes)
-                    # if you also want GT, you could call plot_image twice or modify it
+            plt.subplot(1,3,3)
+            plt.title("Pred mask")
+            plt.imshow(mask_pred, cmap="gray")
+            plt.axis("off")
 
-                # only first batch
-                break
+            plt.show()
 
         return
+
+
+
 if __name__ == "__main__":
     main()
