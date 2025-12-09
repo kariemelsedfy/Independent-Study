@@ -11,8 +11,9 @@ import torchvision.transforms.functional as FT
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from model import Yolov1, YoloSegNet
+from model import Yolov1, YoloUNet
 from dataset import CubYoloDataset, CubSegDataset
+import os
 from utils import (
     non_max_suppression,
     mean_average_precision,
@@ -38,7 +39,7 @@ else:
     DEVICE = "cpu"
 BATCH_SIZE = 16 # 64 in original paper but I don't have that much vram, grad accum?
 WEIGHT_DECAY = 0
-EPOCHS = 30
+EPOCHS = 50
 NUM_WORKERS = 4
 PIN_MEMORY = False
 LOAD_MODEL = True
@@ -80,37 +81,69 @@ transform = transform = Compose([
 ])
 
 
-def train_fn(train_loader, model, optimizer, loss_fn):
-    loop = tqdm(train_loader, leave=True)
-    mean_loss = []
+def train_fn(loader, model, optimizer, loss_fn):
+    model.train()
+    loop = tqdm(loader)
+    losses = []
 
-    for batch_idx, (x, y) in enumerate(loop):
-        x, y = x.to(DEVICE), y.to(DEVICE)
-        out = model(x)
-        loss = loss_fn(out, y)
-        mean_loss.append(loss.item())
+    for x, y in loop:
+        x = x.to(DEVICE)
+        y = y.long().to(DEVICE)   # masks
+
+        preds = model(x)
+        loss = loss_fn(preds, y)
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # update progress bar
+        losses.append(loss.item())
         loop.set_postfix(loss=loss.item())
 
-    print(f"Mean loss was {sum(mean_loss)/len(mean_loss)}")
+    return sum(losses) / len(losses)
 
+def eval_fn(loader, model, loss_fn):
+    model.eval()
+    losses = []
+
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(DEVICE)
+            y = y.long().to(DEVICE)
+
+            preds = model(x)
+            loss = loss_fn(preds, y)
+            losses.append(loss.item())
+
+    return sum(losses) / len(losses)
 
 def main():
-    SEG_CHECKPOINT = "segnet_epoch200.pth.tar"  # whatever you saved
+    # SEG_CHECKPOINT = "segnet_epoch200.pth.tar"  # whatever you saved
 
-    # Recreate the model with same architecture
+    # # Recreate the model with same architecture
     CUB_CLASSES = 200
     NUM_SEG_CLASSES = 2
 
+    train_dataset = CubSegDataset(
+        cub_root=CUB_ROOT,
+        seg_root=SEG_ROOT,
+        split="train",
+        transform = transform
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+    )
 
     test_dataset = CubSegDataset(
         cub_root=CUB_ROOT,
         seg_root=SEG_ROOT,
         split="test",
+        transform = transform
     )
     test_loader = DataLoader(
         test_dataset,
@@ -121,6 +154,7 @@ def main():
     )
 
 
+    # 1) Create YOLO encoder
     yolo = Yolov1(
         in_channels=3,
         split_size=7,
@@ -128,17 +162,36 @@ def main():
         num_classes=CUB_CLASSES,
     ).to(DEVICE)
 
-    seg_model = YoloSegNet(yolo, num_seg_classes=NUM_SEG_CLASSES).to(DEVICE)
+    # 2) Load YOLO encoder weights ONLY
+    if LOAD_MODEL:
+        checkpoint = torch.load(LOAD_MODEL_FILE, map_location=DEVICE)
+        load_checkpoint(checkpoint, yolo, optimizer=None)
+        print("✅ Loaded pretrained YOLO encoder weights")
 
-    # Load seg weights (no need for optimizer during testing)
-    checkpoint = torch.load(SEG_CHECKPOINT, map_location=DEVICE)
-    load_checkpoint(checkpoint, seg_model, optimizer=None)
+    # 3) Create the segmentation model
+    seg_model = YoloUNet(yolo, num_seg_classes=NUM_SEG_CLASSES).to(DEVICE)
+
+    criterion = nn.CrossEntropyLoss()
+
+    optimizer = optim.Adam(
+        seg_model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+    )
+
+    # seg_model = YoloSegNet(yolo, num_seg_classes=NUM_SEG_CLASSES).to(DEVICE)
+
+    # # Load seg weights (no need for optimizer during testing)
+    # checkpoint = torch.load(SEG_CHECKPOINT, map_location=DEVICE)
+    # load_checkpoint(checkpoint, seg_model, optimizer=None)
     
 
-    TEST_ONLY = True
+    TEST_ONLY = False
 
     if TEST_ONLY:
         seg_model.eval()
+        save_dir = "decoderNoSkipPlots"   
+        os.makedirs(save_dir, exist_ok=True)
 
         # get 1 batch from test loader
         images, masks = next(iter(test_loader))
@@ -173,10 +226,43 @@ def main():
             plt.imshow(mask_pred, cmap="gray")
             plt.axis("off")
 
+            out_path = os.path.join(save_dir, f"decoderNoSkip_{i}.png")
+            plt.savefig(out_path, bbox_inches="tight")
+
+
             plt.show()
 
         return
 
+
+    for epoch in range(EPOCHS):
+        print(f"\nEpoch [{epoch+1}/{EPOCHS}]")
+
+        train_loss = train_fn(
+            train_loader,
+            seg_model,
+            optimizer,
+            criterion,
+        )
+
+        val_loss = eval_fn(
+            test_loader,
+            seg_model,
+            criterion,
+        )
+
+        print(f"Train Loss: {train_loss:.4f}")
+        print(f"Val   Loss: {val_loss:.4f}")
+
+        if epoch == 49:
+            save_checkpoint(
+                {
+                    "state_dict": seg_model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                },
+                filename="UnetSegmentation.pth.tar",
+            )
 
 
 if __name__ == "__main__":

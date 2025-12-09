@@ -2,6 +2,7 @@ import torch
 import os
 import pandas as pd
 from PIL import Image
+from torchvision import transforms as T
 
 class CubYoloDataset(torch.utils.data.Dataset):
     """
@@ -153,3 +154,69 @@ class CubYoloDataset(torch.utils.data.Dataset):
             label_matrix[i, j, int(class_label)] = 1.0
 
         return image, label_matrix
+
+class CubSegDataset(torch.utils.data.Dataset):
+    def __init__(self, cub_root, seg_root, split="train", transform=None):
+        self.cub_root = cub_root
+        self.seg_root = seg_root
+        self.split = split
+        self.transform = transform
+
+        self.images_dir = os.path.join(cub_root, "images")
+
+        images_txt = os.path.join(cub_root, "images.txt")
+        split_txt  = os.path.join(cub_root, "train_test_split.txt")
+
+        self.img_id_to_rel = {}
+        with open(images_txt, "r") as f:
+            for line in f:
+                img_id_str, rel_path = line.strip().split()
+                self.img_id_to_rel[int(img_id_str)] = rel_path
+
+        self.samples = []
+        with open(split_txt, "r") as f:
+            for line in f:
+                img_id_str, is_train_str = line.strip().split()
+                img_id = int(img_id_str)
+                is_train = int(is_train_str)
+
+                if split == "train" and is_train == 1:
+                    self.samples.append(img_id)
+                elif split == "test" and is_train == 0:
+                    self.samples.append(img_id)
+
+        self.mask_resize = T.Resize((448, 448), interpolation=Image.NEAREST)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _mask_path_from_rel(self, rel_path):
+        if rel_path.startswith("images/"):
+            rel_sub = rel_path[len("images/"):]
+        else:
+            rel_sub = rel_path
+
+        base, _ = os.path.splitext(rel_sub)
+        mask_rel = base + ".png"
+        return os.path.join(self.seg_root, mask_rel)
+
+    def __getitem__(self, idx):
+        img_id = self.samples[idx]
+        rel_path = self.img_id_to_rel[img_id]
+
+        # --- IMAGE ---
+        img_path = os.path.join(self.images_dir, rel_path)
+        img = Image.open(img_path).convert("RGB")
+
+        if self.transform is not None:
+            img, _ = self.transform(img, None)
+
+        # --- MASK ---
+        mask_path = self._mask_path_from_rel(rel_path)
+        mask = Image.open(mask_path).convert("L")
+        mask = self.mask_resize(mask)
+
+        mask = T.ToTensor()(mask)
+        mask = (mask > 0.5).long().squeeze(0)
+
+        return img, mask

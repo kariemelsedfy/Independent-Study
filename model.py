@@ -79,85 +79,93 @@ class Yolov1(nn.Module):
         )
 
     def forward(self, x):
-        """
-        Standard YOLO forward used for training.
-        Outputs shape: (B, S*S*(C + B*5))
-        which matches YoloLoss and your dataset label_matrix.
-        """
-        x = self.darknet(x)             # (B,1024,S,S), e.g. (B,1024,7,7) for 448x448 input
-        x = self.head(x)                # (B,C+5B,S,S)
-        x = x.permute(0, 2, 3, 1)       # (B,S,S,C+5B)
-        return x.reshape(x.size(0), -1) # (B, S*S*(C+5B))
+        # Pass through each layer manually since darknet is a ModuleList
+        for layer in self.darknet:
+            x = layer(x)
 
-    def forward_dense_stride1(self, x):
-        """
-        Dense inference mode:
-        - Temporarily set all Conv2d & MaxPool2d strides to 1
-        - Replace pooling kernels with 1x1 (no spatial downsample)
-        - Run the network and restore original settings
+        x = self.head(x)
+        x = x.permute(0, 2, 3, 1)
+        return x.reshape(x.size(0), -1)
 
-        Returns: (B, C+5B, H, W) where H,W are ~input size
-        """
-        # Save original strides / kernel sizes / paddings
-        conv_modules = []
-        pool_modules = []
+    def forward_features(self, x):
+        skip_connections = []
 
-        for m in self.darknet.modules():
-            if isinstance(m, nn.Conv2d):
-                conv_modules.append((m, m.stride))
-            elif isinstance(m, nn.MaxPool2d):
-                pool_modules.append((m, m.kernel_size, m.stride, m.padding))
+        for layer in self.darknet:
+            x = layer(x)
 
-        # Patch: remove downsampling
-        for m, stride in conv_modules:
-            if stride != (1, 1):
-                m.stride = (1, 1)
+            # save skips right after each MaxPool
+            if isinstance(layer, nn.MaxPool2d):
+                skip_connections.append(x)
 
-        for m, k, s, p in pool_modules:
-            # Make pooling a 1x1 identity-like op
-            m.kernel_size = (1, 1)
-            m.stride = (1, 1)
-            m.padding = (0, 0)
+        return x, skip_connections
 
-        # Forward pass with no grad
-        with torch.no_grad():
-            feat = self.darknet(x)   # (B,1024,H,W) now close to input size
-            out = self.head(feat)    # (B,C+5B,H,W)
+    # def forward_dense_stride1(self, x):
+    #     """
+    #     Dense inference mode:
+    #     - Temporarily set all Conv2d & MaxPool2d strides to 1
+    #     - Replace pooling kernels with 1x1 (no spatial downsample)
+    #     - Run the network and restore original settings
 
-        # Restore original conv/pool settings
-        for (m, stride) in conv_modules:
-            m.stride = stride
+    #     Returns: (B, C+5B, H, W) where H,W are ~input size
+    #     """
+    #     # Save original strides / kernel sizes / paddings
+    #     conv_modules = []
+    #     pool_modules = []
 
-        for (m, k, s, p) in pool_modules:
-            m.kernel_size = k
-            m.stride = s
-            m.padding = p
+    #     for m in self.darknet.modules():
+    #         if isinstance(m, nn.Conv2d):
+    #             conv_modules.append((m, m.stride))
+    #         elif isinstance(m, nn.MaxPool2d):
+    #             pool_modules.append((m, m.kernel_size, m.stride, m.padding))
 
-        return out  # (B, C+5B, H, W)
+    #     # Patch: remove downsampling
+    #     for m, stride in conv_modules:
+    #         if stride != (1, 1):
+    #             m.stride = (1, 1)
+
+    #     for m, k, s, p in pool_modules:
+    #         # Make pooling a 1x1 identity-like op
+    #         m.kernel_size = (1, 1)
+    #         m.stride = (1, 1)
+    #         m.padding = (0, 0)
+
+    #     # Forward pass with no grad
+    #     with torch.no_grad():
+    #         feat = self.darknet(x)   # (B,1024,H,W) now close to input size
+    #         out = self.head(feat)    # (B,C+5B,H,W)
+
+    #     # Restore original conv/pool settings
+    #     for (m, stride) in conv_modules:
+    #         m.stride = stride
+
+    #     for (m, k, s, p) in pool_modules:
+    #         m.kernel_size = k
+    #         m.stride = s
+    #         m.padding = p
+
+    #     return out  # (B, C+5B, H, W)
 
     def _create_conv_layers(self, architecture):
-        layers = []
+        layers = nn.ModuleList()
         in_channels = self.in_channels
 
         for x in architecture:
             if type(x) == tuple:
-                layers += [
+                layers.append(
                     CNNBlock(
-                        in_channels, x[1], kernel_size=x[0], stride=x[2], padding=x[3],
+                        in_channels, x[1],
+                        kernel_size=x[0], stride=x[2], padding=x[3],
                     )
-                ]
+                )
                 in_channels = x[1]
 
             elif type(x) == str:
-                layers += [nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))]
+                layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
 
             elif type(x) == list:
-                conv1 = x[0]
-                conv2 = x[1]
-                num_repeats = x[2]
-
+                conv1, conv2, num_repeats = x
                 for _ in range(num_repeats):
-                    layers += [
+                    layers.append(
                         CNNBlock(
                             in_channels,
                             conv1[1],
@@ -165,8 +173,8 @@ class Yolov1(nn.Module):
                             stride=conv1[2],
                             padding=conv1[3],
                         )
-                    ]
-                    layers += [
+                    )
+                    layers.append(
                         CNNBlock(
                             conv1[1],
                             conv2[1],
@@ -174,63 +182,70 @@ class Yolov1(nn.Module):
                             stride=conv2[2],
                             padding=conv2[3],
                         )
-                    ]
+                    )
                     in_channels = conv2[1]
 
-        return nn.Sequential(*layers)
+        return layers
 
 
 
-class YoloSegNet(nn.Module):
+class YoloUNet(nn.Module):
     def __init__(self, yolo_encoder: Yolov1, num_seg_classes: int):
         super().__init__()
 
-        # 1) Use YOLO's darknet as encoder
-        self.encoder = yolo_encoder.darknet  # (B, 1024, 7, 7) for 448×448 input
+        self.encoder = yolo_encoder
 
-        # 2) Freeze encoder weights
+        # Freeze YOLO encoder
         for p in self.encoder.parameters():
             p.requires_grad = False
 
-        enc_channels = 1024  # from your architecture
+        # YOLO bottleneck has 1024 channels at 7x7
+        # Decoder: 7 -> 14 -> 28 -> 56 -> 112 -> 224 -> 448
+        # Skips at: 14 (s4), 28 (s3), 56 (s2), 112 (s1)
 
-        # 3) SegNet-like decoder: 7×7 → 448×448 (factor 64 = 2^6)
-        self.decoder = nn.Sequential(
-            # 7x7 -> 14x14
-            nn.ConvTranspose2d(enc_channels, 512, kernel_size=2, stride=2),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
+        self.up1 = self._up(1024, 512)           # 7  -> 14, no skip yet
+        self.up2 = self._up(512 + 1024, 512)     # 14 -> 28, concat s4 (1024) → 1536 in
+        self.up3 = self._up(512 + 512, 256)      # 28 -> 56, concat s3 (512)  → 1024 in
+        self.up4 = self._up(256 + 192, 128)      # 56 -> 112, concat s2 (192) → 448 in
+        self.up5 = self._up(128 + 64, 64)        # 112 -> 224, concat s1 (64) → 192 in
 
-            # 14x14 -> 28x28
-            nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
+        self.out_up = self._up(64, 32)           # 224 -> 448, no skip
+        self.seg_head = nn.Conv2d(32, num_seg_classes, kernel_size=1)
 
-            # 28x28 -> 56x56
-            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-
-            # 56x56 -> 112x112
-            nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-
-            # 112x112 -> 224x224
-            nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-
-            # 224x224 -> 448x448, output logits for each class
-            nn.ConvTranspose2d(32, num_seg_classes, kernel_size=2, stride=2),
-            # no activation here – use logits with CrossEntropyLoss
+    def _up(self, in_ch, out_ch):
+        return nn.Sequential(
+            nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
         )
 
+
     def forward(self, x):
-        # Encoder: frozen YOLO backbone
-        feat = self.encoder(x)           # (B, 1024, 7, 7)
+        # bottleneck: (B,1024,7,7)
+        # skips: [s1(64,112,112), s2(192,56,56), s3(512,28,28), s4(1024,14,14)]
+        bottleneck, skips = self.encoder.forward_features(x)
+        s1, s2, s3, s4 = skips
 
-        # Decoder: trainable segmentation head
-        logits = self.decoder(feat)      # (B, num_seg_classes, 448, 448)
+        # 7 -> 14
+        x = self.up1(bottleneck)         # (B,512,14,14)
 
-        return logits
+        # 14 -> 28 + skip 14
+        x = torch.cat([x, s4], dim=1)    # (B,512+1024=1536,14,14)
+        x = self.up2(x)                  # (B,512,28,28)
+
+        # 28 -> 56 + skip 28
+        x = torch.cat([x, s3], dim=1)    # (B,512+512=1024,28,28)
+        x = self.up3(x)                  # (B,256,56,56)
+
+        # 56 -> 112 + skip 56
+        x = torch.cat([x, s2], dim=1)    # (B,256+192=448,56,56)
+        x = self.up4(x)                  # (B,128,112,112)
+
+        # 112 -> 224 + skip 112
+        x = torch.cat([x, s1], dim=1)    # (B,128+64=192,112,112)
+        x = self.up5(x)                  # (B,64,224,224)
+
+        # 224 -> 448 (no skip)
+        x = self.out_up(x)               # (B,32,448,448)
+
+        return self.seg_head(x)          # (B,num_seg_classes,448,448)
