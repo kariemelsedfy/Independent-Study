@@ -50,6 +50,25 @@ def intersection_over_union(boxes_preds, boxes_labels, box_format="midpoint"):
     box2_area = abs((box2_x2 - box2_x1) * (box2_y2 - box2_y1))
 
     return intersection / (box1_area + box2_area - intersection + 1e-6)
+def batch_iou_from_logits(logits, targets, eps=1e-6):
+    """
+    logits: (B, C, H, W)  -- here C = 2
+    targets: (B, H, W)    -- 0 or 1
+
+    Returns mean IoU over the batch for the foreground class (1).
+    """
+    # predicted labels
+    preds = torch.argmax(logits, dim=1)          # (B,H,W)
+
+    preds = preds.bool()
+    targets = targets.bool()
+
+    # intersection and union per image
+    intersection = (preds & targets).float().sum(dim=(1, 2))
+    union        = (preds | targets).float().sum(dim=(1, 2))
+
+    iou = (intersection + eps) / (union + eps)    # (B,)
+    return iou.mean().item()
 
 
 def non_max_suppression(bboxes, iou_threshold, threshold, box_format="corners"):

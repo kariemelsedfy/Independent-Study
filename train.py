@@ -11,7 +11,7 @@ import torchvision.transforms.functional as FT
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from model import Yolov1, YoloUNet
+from model import Yolov1, YoloUNet, YoloSegNet, Yolov1seq
 from dataset import CubYoloDataset, CubSegDataset
 import os
 from utils import (
@@ -23,6 +23,7 @@ from utils import (
     plot_image,
     save_checkpoint,
     load_checkpoint,
+    batch_iou_from_logits
 )
 from loss import YoloLoss
 
@@ -118,7 +119,7 @@ def eval_fn(loader, model, loss_fn):
     return sum(losses) / len(losses)
 
 def main():
-    # SEG_CHECKPOINT = "segnet_epoch200.pth.tar"  # whatever you saved
+    SEG_CHECKPOINT = "segnet_epoch200.pth.tar"  # whatever you saved
 
     # # Recreate the model with same architecture
     CUB_CLASSES = 200
@@ -155,7 +156,7 @@ def main():
 
 
     # 1) Create YOLO encoder
-    yolo = Yolov1(
+    yolo = Yolov1seq(
         in_channels=3,
         split_size=7,
         num_boxes=2,
@@ -169,7 +170,7 @@ def main():
         print("✅ Loaded pretrained YOLO encoder weights")
 
     # 3) Create the segmentation model
-    seg_model = YoloUNet(yolo, num_seg_classes=NUM_SEG_CLASSES).to(DEVICE)
+    seg_model = YoloSegNet(yolo, num_seg_classes=NUM_SEG_CLASSES).to(DEVICE)
 
     criterion = nn.CrossEntropyLoss()
 
@@ -186,9 +187,13 @@ def main():
     # load_checkpoint(checkpoint, seg_model, optimizer=None)
     
 
-    TEST_ONLY = False
+    TEST_ONLY = True
 
     if TEST_ONLY:
+
+        checkpoint = torch.load(SEG_CHECKPOINT, map_location=DEVICE)
+        load_checkpoint(checkpoint, seg_model, optimizer=None)
+        # print("✅ Loaded trained UNet segmentation model")
         seg_model.eval()
         save_dir = "decoderNoSkipPlots"   
         os.makedirs(save_dir, exist_ok=True)
@@ -201,13 +206,19 @@ def main():
             logits = seg_model(images)
             preds = torch.argmax(logits, dim=1)
 
-        import matplotlib.pyplot as plt
-
         # plot up to 4 images
         for i in range(min(10, images.size(0))):
             img   = images[i].permute(1, 2, 0).cpu().numpy()
             mask_gt   = masks[i].cpu().numpy()
             mask_pred = preds[i].cpu().numpy()
+
+            # ---- IoU for this sample (foreground class=1) ----
+            pred_bool = (mask_pred == 1)
+            gt_bool   = (mask_gt == 1)
+
+            intersection = (pred_bool & gt_bool).sum()
+            union        = (pred_bool | gt_bool).sum()
+            iou = (intersection / union) if union > 0 else 0.0
 
             plt.figure(figsize=(12,4))
 
@@ -222,11 +233,11 @@ def main():
             plt.axis("off")
 
             plt.subplot(1,3,3)
-            plt.title("Pred mask")
+            plt.title(f"Pred mask\nIoU = {iou:.3f}")
             plt.imshow(mask_pred, cmap="gray")
             plt.axis("off")
 
-            out_path = os.path.join(save_dir, f"decoderNoSkip_{i}.png")
+            out_path = os.path.join(save_dir, f"decoderSkip_{i}.png")
             plt.savefig(out_path, bbox_inches="tight")
 
 

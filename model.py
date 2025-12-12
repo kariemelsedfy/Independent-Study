@@ -99,6 +99,92 @@ class Yolov1(nn.Module):
 
         return x, skip_connections
 
+
+class Yolov1seq(nn.Module):
+    def __init__(self, in_channels=3, split_size=7, num_boxes=2, num_classes=1):
+        """
+        split_size: S (e.g. 7)
+        num_boxes:  B (e.g. 2)
+        num_classes: C
+        """
+        super(Yolov1seq, self).__init__()
+        self.architecture = architecture_config
+        self.in_channels = in_channels
+        self.S = split_size
+        self.B = num_boxes
+        self.C = num_classes
+
+        self.darknet = self._create_conv_layers(self.architecture)
+
+        # Conv head instead of fully-connected layers:
+        # per cell we predict C class scores + B*(x,y,w,h,conf)
+        out_channels = self.C + self.B * 5
+        self.head = nn.Sequential(
+            nn.Conv2d(1024, 512, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.1, inplace=True),
+
+            nn.Conv2d(512, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.1, inplace=True),
+
+            nn.Conv2d(256, out_channels, kernel_size=1, stride=1)
+        )
+
+    def forward(self, x):
+        """
+        Standard YOLO forward used for training.
+        Outputs shape: (B, S*S*(C + B*5))
+        which matches YoloLoss and your dataset label_matrix.
+        """
+        x = self.darknet(x)             # (B,1024,S,S), e.g. (B,1024,7,7) for 448x448 input
+        x = self.head(x)                # (B,C+5B,S,S)
+        x = x.permute(0, 2, 3, 1)       # (B,S,S,C+5B)
+        return x.reshape(x.size(0), -1) # (B, S*S*(C+5B))
+
+    def _create_conv_layers(self, architecture):
+        layers = []
+        in_channels = self.in_channels
+
+        for x in architecture:
+            if type(x) == tuple:
+                layers += [
+                    CNNBlock(
+                        in_channels, x[1], kernel_size=x[0], stride=x[2], padding=x[3],
+                    )
+                ]
+                in_channels = x[1]
+
+            elif type(x) == str:
+                layers += [nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))]
+
+            elif type(x) == list:
+                conv1 = x[0]
+                conv2 = x[1]
+                num_repeats = x[2]
+
+                for _ in range(num_repeats):
+                    layers += [
+                        CNNBlock(
+                            in_channels,
+                            conv1[1],
+                            kernel_size=conv1[0],
+                            stride=conv1[2],
+                            padding=conv1[3],
+                        )
+                    ]
+                    layers += [
+                        CNNBlock(
+                            conv1[1],
+                            conv2[1],
+                            kernel_size=conv2[0],
+                            stride=conv2[2],
+                            padding=conv2[3],
+                        )
+                    ]
+                    in_channels = conv2[1]
+
+        return nn.Sequential(*layers)
     # def forward_dense_stride1(self, x):
     #     """
     #     Dense inference mode:
@@ -249,3 +335,58 @@ class YoloUNet(nn.Module):
         x = self.out_up(x)               # (B,32,448,448)
 
         return self.seg_head(x)          # (B,num_seg_classes,448,448)
+    
+
+class YoloSegNet(nn.Module):
+    def __init__(self, yolo_encoder: Yolov1, num_seg_classes: int):
+        super().__init__()
+
+        # 1) Use YOLO's darknet as encoder
+        self.encoder = nn.Sequential(*yolo_encoder.darknet)  # (B, 1024, 7, 7) for 448×448 input
+
+        # 2) Freeze encoder weights
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+
+        enc_channels = 1024  # from your architecture
+
+        # 3) SegNet-like decoder: 7×7 → 448×448 (factor 64 = 2^6)
+        self.decoder = nn.Sequential(
+            # 7x7 -> 14x14
+            nn.ConvTranspose2d(enc_channels, 512, kernel_size=2, stride=2),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+
+            # 14x14 -> 28x28
+            nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+
+            # 28x28 -> 56x56
+            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+
+            # 56x56 -> 112x112
+            nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+
+            # 112x112 -> 224x224
+            nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+
+            # 224x224 -> 448x448, output logits for each class
+            nn.ConvTranspose2d(32, num_seg_classes, kernel_size=2, stride=2),
+            # no activation here – use logits with CrossEntropyLoss
+        )
+
+    def forward(self, x):
+        # Encoder: frozen YOLO backbone
+        feat = self.encoder(x)           # (B, 1024, 7, 7)
+
+        # Decoder: trainable segmentation head
+        logits = self.decoder(feat)      # (B, num_seg_classes, 448, 448)
+
+        return logits
