@@ -190,58 +190,42 @@ def main():
     TEST_ONLY = True
 
     if TEST_ONLY:
-
         checkpoint = torch.load(SEG_CHECKPOINT, map_location=DEVICE)
         load_checkpoint(checkpoint, seg_model, optimizer=None)
-        # print("✅ Loaded trained UNet segmentation model")
         seg_model.eval()
-        save_dir = "decoderNoSkipPlots"   
-        os.makedirs(save_dir, exist_ok=True)
 
-        # get 1 batch from test loader
-        images, masks = next(iter(test_loader))
-        images = images.to(DEVICE)
+        all_ious = []
 
         with torch.no_grad():
-            logits = seg_model(images)
-            preds = torch.argmax(logits, dim=1)
+            for images, masks in tqdm(test_loader, desc="Evaluating IoU"):
+                images = images.to(DEVICE)
+                masks  = masks.to(DEVICE).long()   # (B,H,W)
 
-        # plot up to 4 images
-        for i in range(min(10, images.size(0))):
-            img   = images[i].permute(1, 2, 0).cpu().numpy()
-            mask_gt   = masks[i].cpu().numpy()
-            mask_pred = preds[i].cpu().numpy()
+                logits = seg_model(images)         # (B,2,H,W)
+                preds  = torch.argmax(logits, dim=1)
 
-            # ---- IoU for this sample (foreground class=1) ----
-            pred_bool = (mask_pred == 1)
-            gt_bool   = (mask_gt == 1)
+                # foreground = class 1
+                pred_fg = (preds == 1)
+                gt_fg   = (masks == 1)
 
-            intersection = (pred_bool & gt_bool).sum()
-            union        = (pred_bool | gt_bool).sum()
-            iou = (intersection / union) if union > 0 else 0.0
+                # compute per-image IoU
+                intersection = (pred_fg & gt_fg).flatten(1).sum(dim=1).float()
+                union        = (pred_fg | gt_fg).flatten(1).sum(dim=1).float()
 
-            plt.figure(figsize=(12,4))
+                # skip images with no foreground in GT
+                valid = union > 0
+                iou = intersection[valid] / union[valid]
 
-            plt.subplot(1,3,1)
-            plt.title("Image")
-            plt.imshow(img)
-            plt.axis("off")
+                all_ious.extend(iou.cpu().tolist())
 
-            plt.subplot(1,3,2)
-            plt.title("GT mask")
-            plt.imshow(mask_gt, cmap="gray")
-            plt.axis("off")
+        mean_iou = sum(all_ious) / len(all_ious)
 
-            plt.subplot(1,3,3)
-            plt.title(f"Pred mask\nIoU = {iou:.3f}")
-            plt.imshow(mask_pred, cmap="gray")
-            plt.axis("off")
-
-            out_path = os.path.join(save_dir, f"decoderSkip_{i}.png")
-            plt.savefig(out_path, bbox_inches="tight")
-
-
-            plt.show()
+        print(f"\nTest Mean IoU (foreground=1): {mean_iou:.4f}")
+        print(f"Evaluated on {len(all_ious)} images")
+        print(f"IoU min / median / max: "
+            f"{min(all_ious):.3f} / "
+            f"{sorted(all_ious)[len(all_ious)//2]:.3f} / "
+            f"{max(all_ious):.3f}")
 
         return
 
